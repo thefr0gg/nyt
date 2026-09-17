@@ -13,7 +13,7 @@ packages = [
 python = ">=3.11,<4.0"
 yt-dlp = ">=2024.5.27,<2027.0.0"
 fastapi = ">=0.111,<0.142"
-uvicorn = ">=0.30,<0.53"
+uvicorn = ">=0.30,<0.54"
 loguru = "^0.7.0"
 requests = "^2.31.0"
 orjson = "^3.9"
