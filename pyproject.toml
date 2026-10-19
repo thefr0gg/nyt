@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nyt"
-version = "0.2.4"
+version = "0.2.6"
 description = "Stop wasting time on YouTube"
 authors = ["thefr0gg"]
 license = "GPL-3.0"

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.6 — 2026-10-19
+
+### Added
+
+- Per-channel download quality cap (default 1080p), set on the Channels page.
+- Right-click menu on videos: open on YouTube, go to channel, mark all above as watched, pin to top (watch later), details, re-download at a chosen quality, show in folder, refresh metadata.
+- Details dialog with on-demand local quality versions (1080p–240p) per video, independent of the global Transcoding setting.
+- Channel filter dropdown on the Videos page, and themed dropdown menus across the app.
+- Quality switcher in the player's control bar (works in fullscreen) that keeps your position and remembers your choice.
+- Volume and mute are remembered globally across videos.
+- Minimizable download progress panel with one combined bar and a merge step.
+- Tracked channels follow handle changes automatically (permanent channel ID stored).
+
+### Fixes
+
+- Seeking and resume now work: the video endpoint serves proper HTTP range requests, and resume positions are saved while playing.
+- Download progress no longer prints to the terminal; "finished" is reported only once the video is in the library.
+- Failed downloads are retried on the next check instead of being skipped permanently; one failing channel no longer aborts the whole cycle.
+- yt-dlp now merges separate video/audio streams, so downloads no longer fail with "Requested format is not available".
+- The right-click menu was never visible (hidden by its own stylesheet).
+- Update check: proper version comparison, no logging crash on Windows, and no self-update over a source checkout.
+
+---
+
 ## v0.2.4 — 2026-09-06
 
 ### Changed

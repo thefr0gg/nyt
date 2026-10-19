@@ -11,6 +11,16 @@ from nyt.src.database.tables.watched_videos_table import WatchedVideos
 from nyt.src.utils import date_in_gmt
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """`with conn:` normally only commits/rolls back; this also closes, so handles aren't leaked."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 _SCHEMA = """\
 PRAGMA journal_mode=WAL;
 
@@ -26,7 +36,9 @@ CREATE TABLE IF NOT EXISTS channels (
     watch_delay_minutes        INTEGER,
     last_checked_at            TEXT,
     auto_download              INTEGER DEFAULT 1,
-    added_at                   TEXT NOT NULL
+    added_at                   TEXT NOT NULL,
+    channel_id                 TEXT NOT NULL DEFAULT '',
+    max_height                 INTEGER NOT NULL DEFAULT 1080
 );
 
 CREATE TABLE IF NOT EXISTS videos (
@@ -44,7 +56,8 @@ CREATE TABLE IF NOT EXISTS videos (
     added_at       TEXT NOT NULL,
     variants       TEXT NOT NULL DEFAULT '[]',
     subtitles      TEXT NOT NULL DEFAULT '[]',
-    chapters       TEXT NOT NULL DEFAULT '[]'
+    chapters       TEXT NOT NULL DEFAULT '[]',
+    pinned         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS watched_videos (
@@ -65,6 +78,9 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (5, "ALTER TABLE videos ADD COLUMN variants TEXT NOT NULL DEFAULT '[]'"),
     (6, "ALTER TABLE videos ADD COLUMN subtitles TEXT NOT NULL DEFAULT '[]'"),
     (7, "ALTER TABLE videos ADD COLUMN chapters TEXT NOT NULL DEFAULT '[]'"),
+    (8, "ALTER TABLE channels ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''"),
+    (9, "ALTER TABLE channels ADD COLUMN max_height INTEGER NOT NULL DEFAULT 1080"),
+    (10, "ALTER TABLE videos ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"),
 ]
 
 _SCHEMA_VERSION = _MIGRATIONS[-1][0] if _MIGRATIONS else 0
@@ -94,9 +110,12 @@ class DatabaseHandler:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, check_same_thread=False)
+        # WAL is persistent once set (see _SCHEMA), so it isn't re-issued per connection.
+        conn = sqlite3.connect(
+            self._path, timeout=30, check_same_thread=False, factory=_ClosingConnection,
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_db(self) -> None:
@@ -144,6 +163,8 @@ class DatabaseHandler:
             last_checked_at            = _parse_dt(row["last_checked_at"]),
             auto_download              = bool(ad) if ad is not None else True,
             added_at                   = _parse_dt(row["added_at"]),
+            channel_id                 = (row["channel_id"] if "channel_id" in row.keys() else "") or "",
+            max_height                 = row["max_height"] if "max_height" in row.keys() and row["max_height"] is not None else 1080,
         )
 
     @staticmethod
@@ -172,6 +193,7 @@ class DatabaseHandler:
             variants       = self._json_col(row, "variants"),
             subtitles      = self._json_col(row, "subtitles"),
             chapters       = self._json_col(row, "chapters"),
+            pinned         = bool(row["pinned"]) if "pinned" in row.keys() else False,
         )
 
     @staticmethod
@@ -196,8 +218,8 @@ class DatabaseHandler:
                     channel_uid, channel_handle, channel_name,
                     video_starting_point_id, watched_videos_uid,
                     channel_avatar_url_default, channel_avatar_url_medium, channel_avatar_url_high,
-                    watch_delay_minutes, last_checked_at, auto_download, added_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    watch_delay_minutes, last_checked_at, auto_download, added_at, channel_id, max_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     channel.channel_uid, channel.channel_handle, channel.channel_name,
@@ -209,6 +231,8 @@ class DatabaseHandler:
                     _dt(channel.last_checked_at),
                     int(channel.auto_download) if channel.auto_download is not None else 1,
                     _dt(channel.added_at),
+                    channel.channel_id or "",
+                    channel.max_height if channel.max_height is not None else 1080,
                 ),
             )
             conn.execute(
@@ -281,11 +305,41 @@ class DatabaseHandler:
             )
             conn.commit()
 
+    def update_channel_max_height(self, channel_handle: str, max_height: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channels SET max_height = ? WHERE channel_handle = ?",
+                (max_height, channel_handle),
+            )
+            conn.commit()
+
     def update_channel_auto_download(self, channel_handle: str, auto_download: bool) -> None:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE channels SET auto_download = ? WHERE channel_handle = ?",
                 (int(auto_download), channel_handle),
+            )
+            conn.commit()
+
+    def set_channel_id(self, channel_handle: str, channel_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channels SET channel_id = ? WHERE channel_handle = ?",
+                (channel_id, channel_handle),
+            )
+            conn.commit()
+
+    def rename_channel_handle(self, old_handle: str, new_handle: str, channel_name: str | None = None) -> None:
+        """Re-key a channel and its videos to a new handle in a single transaction."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE channels SET channel_handle = ?, channel_name = COALESCE(?, channel_name) "
+                "WHERE channel_handle = ?",
+                (new_handle, channel_name or None, old_handle),
+            )
+            conn.execute(
+                "UPDATE videos SET channel_handle = ? WHERE channel_handle = ?",
+                (new_handle, old_handle),
             )
             conn.commit()
 
@@ -319,12 +373,12 @@ class DatabaseHandler:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO videos (
+                INSERT OR IGNORE INTO videos (
                     video_id, channel_handle, thumbnail_url, title,
                     publish_date, download_path, is_downloaded, size,
                     is_watched, timestamp, updated_at, added_at,
-                    variants, subtitles, chapters
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    variants, subtitles, chapters, pinned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     video.video_id, video.channel_handle,
@@ -336,6 +390,7 @@ class DatabaseHandler:
                     json.dumps(video.variants  if video.variants  is not None else []),
                     json.dumps(video.subtitles if video.subtitles is not None else []),
                     json.dumps(video.chapters  if video.chapters  is not None else []),
+                    int(bool(video.pinned)),
                 ),
             )
             conn.commit()
@@ -353,7 +408,7 @@ class DatabaseHandler:
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM videos
-                   WHERE is_watched = 1 AND is_downloaded = 1
+                   WHERE is_watched = 1 AND is_downloaded = 1 AND pinned = 0
                    AND timestamp IS NOT NULL AND timestamp <= ?""",
                 (cutoff,),
             ).fetchall()
@@ -388,6 +443,22 @@ class DatabaseHandler:
         with self._connect() as conn:
             conn.execute(f"UPDATE videos SET {set_clause} WHERE video_id = ?", params)
             conn.commit()
+
+    def set_videos_watched(self, video_ids: list[str], watched: bool) -> int:
+        """Mark many videos watched/unwatched in one transaction. Returns the number of rows changed."""
+        changed = 0
+        stamp   = _dt(date_in_gmt())
+        with self._connect() as conn:
+            for i in range(0, len(video_ids), 500):
+                chunk = video_ids[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                cur = conn.execute(
+                    f"UPDATE videos SET is_watched = ?, timestamp = ? WHERE video_id IN ({marks})",
+                    [int(watched), stamp, *chunk],
+                )
+                changed += cur.rowcount
+            conn.commit()
+        return changed
 
     def delete_video_row(self, video_id: str) -> None:
         with self._connect() as conn:

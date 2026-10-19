@@ -1,5 +1,4 @@
 import os
-import re
 import shutil
 import sys
 import uuid
@@ -27,15 +26,6 @@ def generate_uid() -> str:
 
 
 # ── Range header ──────────────────────────────────────────────────────────────
-
-def parse_range_header(header_value: str) -> tuple[int, int | None]:
-    match = re.match(r"bytes=(\d+)-(\d*)", header_value)
-    if match:
-        start = int(match.group(1))
-        end   = int(match.group(2)) if match.group(2) else None
-        return start, end
-    return 0, None
-
 
 # ── Desktop notifications ─────────────────────────────────────────────────────
 

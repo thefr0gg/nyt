@@ -1,5 +1,9 @@
+import json
+import os
 import subprocess
+import tempfile
 import threading
+import time
 import yt_dlp
 import requests
 
@@ -9,6 +13,22 @@ from loguru import logger
 from datetime import datetime
 
 from nyt import constant
+
+
+class _YdlLogger:
+    """Routes yt-dlp's own messages into loguru so nothing (progress bars included) is written to the console."""
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        logger.debug(f"yt-dlp: {msg}")
+
+    def error(self, msg: str) -> None:
+        logger.debug(f"yt-dlp: {msg}")
 
 
 @dataclass
@@ -54,16 +74,38 @@ class NYT:
                 "https://docs.deno.com/runtime/getting_started/installation/ and restart nyt."
             )
 
-        opts: dict = {"quiet": True, "remote_components": {"ejs:github"}}
+        opts: dict = {
+            "quiet":             True,
+            "noprogress":        True,
+            "logger":            _YdlLogger(),
+            "remote_components": {"ejs:github"},
+            "socket_timeout":    30,
+            "retries":           3,
+            "extractor_retries": 3,
+        }
         if deno_path:
             opts["js_runtimes"] = {"deno": {"path": deno_path}}
         return opts
 
-    def _ydl_base_opts(self) -> dict:
+    DEFAULT_MAX_HEIGHT = 1080
+
+    @staticmethod
+    def _format_selector(max_height: int | None) -> str:
+        """
+        yt-dlp format string capped at max_height pixels (0/None = no cap). YouTube now mostly
+        serves separate video/audio streams, so merge them; keep single-file fallbacks, and as a
+        last resort take the smallest format rather than fail when nothing fits under the cap.
+        """
+        cap = f"[height<={int(max_height)}]" if max_height else ""
+        return (
+            f"bv*[ext=mp4]{cap}+ba[ext=m4a]/bv*{cap}+ba/b[ext=mp4]{cap}/b{cap}/wv*+wa/w"
+        )
+
+    def _ydl_base_opts(self, max_height: int | None = DEFAULT_MAX_HEIGHT) -> dict:
         return {
             **self._ydl_common_opts(),
-            "progress": True,
-            "format":   "best[ext=mp4]/best",
+            "format":              self._format_selector(max_height),
+            "merge_output_format": "mp4",
         }
 
     @staticmethod
@@ -106,10 +148,46 @@ class NYT:
                 "it should resolve after a cooldown. If it happens often, consider raising "
                 "the watch delay so fewer requests are made back-to-back."
             )
+        if "http error 404" in msg or "requested entity was not found" in msg:
+            return (
+                "YouTube couldn't find this channel or video (HTTP 404). For a channel, the "
+                "handle was probably changed, or the channel was deleted or terminated. Remove it "
+                "from tracking, or track it again under its new handle."
+            )
         if "http error 403" in msg or "forbidden" in msg:
             return "YouTube returned 403 Forbidden — likely a temporary block or an outdated yt-dlp version."
 
         return str(exc)
+
+    @staticmethod
+    def _is_permanent_error(exc: Exception) -> bool:
+        """True for errors that retrying can never fix (private, members-only, removed)."""
+        msg = str(exc).lower()
+        return any(k in msg for k in (
+            "members-only", "join this channel", "private video", "video unavailable",
+            "has been removed", "this video is not available",
+            "http error 404", "requested entity was not found",
+        ))
+
+    def _with_retries(self, fn, what: str, attempts: int = 3, backoff: float = 5.0):
+        """Run fn(), retrying transient yt-dlp failures with exponential backoff."""
+        for attempt in range(1, attempts + 1):
+            try:
+                return fn()
+            except Exception as exc:
+                if attempt == attempts or self._is_permanent_error(exc):
+                    raise
+                wait = backoff * 2 ** (attempt - 1)
+                logger.warning(
+                    f"{what} failed (attempt {attempt}/{attempts}): {self._explain_ydl_error(exc)} "
+                    f"Retrying in {wait:.0f}s…"
+                )
+                time.sleep(wait)
+
+    @staticmethod
+    def _extract_info(opts: dict, url: str) -> dict | None:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -133,6 +211,7 @@ class NYT:
             channel_avatar_url_medium  = info.get("avatar_url_medium",  ""),
             channel_avatar_url_high    = info.get("avatar_url_high",    ""),
             added_at                   = date_in_gmt(),
+            channel_id                 = info.get("channel_id", ""),
         )
         self.database_handler.add_channel_to_channels(channel=channel)
         display = info.get("channel_name") or channel_handle
@@ -165,162 +244,197 @@ class NYT:
         logger.info(f"Tracking: {', '.join(c.channel_handle for c in channels)}")
 
         for channel in channels:
-            if channel.last_checked_at is not None:
-                delay = channel.watch_delay_minutes or self.config.WATCH_DELAY_MINUTES
-                last  = channel.last_checked_at
-                if hasattr(last, "tzinfo") and last.tzinfo is not None:
-                    last = last.replace(tzinfo=None)
-                elapsed = (datetime.utcnow() - last).total_seconds()
-                if elapsed < delay * 60:
-                    logger.debug(
-                        f"Skipping '{channel.channel_handle}' — "
-                        f"not due for {int((delay * 60 - elapsed) // 60)}m"
-                    )
-                    continue
-
-            logger.info(f"Checking '{channel.channel_handle}' for new uploads")
-
             try:
-                channel_last_videos = self.get_channel_last_videos(channel.channel_handle)
-            except RuntimeError as exc:
-                logger.warning(str(exc))
-                self.database_handler.update_channel_last_checked(channel.channel_handle)
-                continue
+                self._process_channel(channel)
+            except Exception:
+                logger.exception(f"Unexpected error while processing '{channel.channel_handle}' — continuing with the next channel")
 
-            logger.debug(f"Fetched {len(channel_last_videos)} videos")
+    def _process_channel(self, channel: Channels) -> None:
+        if channel.last_checked_at is not None:
+            delay = channel.watch_delay_minutes or self.config.WATCH_DELAY_MINUTES
+            last  = channel.last_checked_at
+            if hasattr(last, "tzinfo") and last.tzinfo is not None:
+                last = last.replace(tzinfo=None)
+            elapsed = (datetime.utcnow() - last).total_seconds()
+            if elapsed < delay * 60:
+                logger.debug(
+                    f"Skipping '{channel.channel_handle}' — "
+                    f"not due for {int((delay * 60 - elapsed) // 60)}m"
+                )
+                return
 
-            start_idx = next(
-                (i for i, v in enumerate(channel_last_videos) if v.video_id == channel.video_starting_point_id),
-                None,
+        logger.info(f"Checking '{channel.channel_handle}' for new uploads")
+
+        try:
+            meta, channel_last_videos = self._fetch_channel_listing(channel)
+        except RuntimeError as exc:
+            logger.warning(str(exc))
+            self.database_handler.update_channel_last_checked(channel.channel_handle)
+            return
+
+        self._sync_channel_identity(channel, meta)
+
+        logger.debug(f"Fetched {len(channel_last_videos)} videos")
+
+        start_idx = next(
+            (i for i, v in enumerate(channel_last_videos) if v.video_id == channel.video_starting_point_id),
+            None,
+        )
+
+        if start_idx is None:
+            logger.warning(
+                f"Starting-point video not found for '{channel.channel_handle}'. "
+                "Treating all fetched videos as new."
+            )
+            new_videos = channel_last_videos
+        elif start_idx == len(channel_last_videos) - 1:
+            logger.info(f"No new videos from '{channel.channel_handle}'.")
+            self.database_handler.update_channel_last_checked(channel.channel_handle)
+            return
+        else:
+            new_videos = channel_last_videos[start_idx + 1:]
+
+        logger.info(f"{len(new_videos)} new video(s) from '{channel.channel_handle}'")
+
+        if self.show_notification:
+            icon = str(Path(self.config.ASSETS_PREFIX) / "nyt-high-resolution-logo.png")
+            send_notification(
+                app_name     = constant.PACKAGE,
+                summary_text = "New YouTube Videos",
+                message      = f"{len(new_videos)} video(s) uploaded by '{channel.channel_handle}'",
+                icon_path    = icon,
             )
 
-            if start_idx is None:
-                logger.warning(
-                    f"Starting-point video not found for '{channel.channel_handle}'. "
-                    "Treating all fetched videos as new."
-                )
-                new_videos = channel_last_videos
-            elif start_idx == len(channel_last_videos) - 1:
-                logger.info(f"No new videos from '{channel.channel_handle}'.")
-                self.database_handler.update_channel_last_checked(channel.channel_handle)
+        auto_dl = channel.auto_download if channel.auto_download is not None else True
+
+        # Only advance the starting point past videos that were handled, so a
+        # transient failure (429, bot-check) is retried on the next cycle.
+        new_start = channel.video_starting_point_id
+
+        for video in new_videos:
+            _transcode_args = None
+
+            if self.database_handler.get_video_from_videos(video_id=video.video_id) is not None:
+                new_start = video.video_id
                 continue
-            else:
-                new_videos = channel_last_videos[start_idx + 1:]
 
-            logger.info(f"{len(new_videos)} new video(s) from '{channel.channel_handle}'")
+            if auto_dl:
+                logger.info(f"Downloading '{video.title}' to '{self.config.VIDEOS_PREFIX_DIRECTORY}'")
 
-            if self.show_notification:
-                icon = str(Path(self.config.ASSETS_PREFIX) / "nyt-high-resolution-logo.png")
-                send_notification(
-                    app_name     = constant.PACKAGE,
-                    summary_text = "New YouTube Videos",
-                    message      = f"{len(new_videos)} video(s) uploaded by '{channel.channel_handle}'",
-                    icon_path    = icon,
-                )
-
-            auto_dl = channel.auto_download if channel.auto_download is not None else True
-
-            for video in new_videos:
-                _transcode_args = None
-
-                if auto_dl:
-                    logger.info(f"Downloading '{video.title}' to '{self.config.VIDEOS_PREFIX_DIRECTORY}'")
-
-                    downloaded = False
-                    for attempt in range(1, self.DOWNLOAD_RETRIES + 1):
-                        try:
-                            output_path, publish_date, title, thumbnail_url, size, height, subtitles, chapters = self.download_video(
-                                video_id         = video.video_id,
-                                prefix_directory = self.config.VIDEOS_PREFIX_DIRECTORY,
-                            )
-                            downloaded = True
-                            break
-                        except Exception as error:
-                            reason = self._explain_ydl_error(error)
-                            if attempt == self.DOWNLOAD_RETRIES:
-                                logger.warning(
-                                    f"Skipping '{video.title}' after {self.DOWNLOAD_RETRIES} failed attempts — {reason}"
-                                )
-                            else:
-                                logger.warning(
-                                    f"Download attempt {attempt}/{self.DOWNLOAD_RETRIES} failed for '{video.title}': "
-                                    f"{reason} Retrying…"
-                                )
-
-                    if not downloaded:
-                        continue
-
-                    if ConfigManager().load_config().TRANSCODING_ENABLED and height and height > 360:
-                        _transcode_args = (video.video_id, output_path, height)
-
-                    record = Videos(
-                        video_id       = video.video_id,
-                        channel_handle = channel.channel_handle,
-                        download_path  = output_path,
-                        is_downloaded  = True,
-                        is_watched     = False,
-                        publish_date   = publish_date,
-                        added_at       = date_in_gmt(),
-                        thumbnail_url  = thumbnail_url,
-                        title          = title,
-                        size           = size,
-                        variants       = [],
-                        subtitles      = subtitles,
-                        chapters       = chapters,
-                    )
-                else:
-                    logger.info(f"Listing '{video.title}' (stream-only)")
+                downloaded = False
+                permanent  = False
+                for attempt in range(1, self.DOWNLOAD_RETRIES + 1):
                     try:
-                        title, thumbnail_url, publish_date = self.fetch_video_metadata(video.video_id)
-                    except Exception as exc:
-                        logger.warning(
-                            f"Could not fetch metadata for '{video.title}' ({video.video_id}): "
-                            f"{self._explain_ydl_error(exc)}"
+                        output_path, publish_date, title, thumbnail_url, size, height, subtitles, chapters = self.download_video(
+                            video_id         = video.video_id,
+                            prefix_directory = self.config.VIDEOS_PREFIX_DIRECTORY,
+                            max_height       = channel.max_height,
                         )
+                        downloaded = True
+                        break
+                    except Exception as error:
+                        reason = self._explain_ydl_error(error)
+                        if self._is_permanent_error(error):
+                            permanent = True
+                            logger.warning(f"Skipping '{video.title}' — {reason}")
+                            break
+                        if attempt == self.DOWNLOAD_RETRIES:
+                            logger.warning(
+                                f"Giving up on '{video.title}' for now after {self.DOWNLOAD_RETRIES} failed attempts — {reason}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Download attempt {attempt}/{self.DOWNLOAD_RETRIES} failed for '{video.title}': "
+                                f"{reason} Retrying…"
+                            )
+
+                if not downloaded:
+                    if permanent:
+                        new_start = video.video_id
                         continue
-
-                    record = Videos(
-                        video_id       = video.video_id,
-                        channel_handle = channel.channel_handle,
-                        download_path  = "",
-                        is_downloaded  = False,
-                        is_watched     = False,
-                        publish_date   = publish_date,
-                        added_at       = date_in_gmt(),
-                        thumbnail_url  = thumbnail_url,
-                        title          = title,
-                        size           = 0,
+                    logger.warning(
+                        f"Stopping '{channel.channel_handle}' for this cycle; '{video.title}' will be retried next check"
                     )
+                    break
 
-                self.database_handler.add_video_to_videos(video=record)
-                self._flag_video_watched(
-                    video_id          = video.video_id,
-                    watched_videos_uid = channel.watched_videos_uid,
+                if ConfigManager().load_config().TRANSCODING_ENABLED and self.wants_transcode(height):
+                    _transcode_args = (video.video_id, output_path)
+
+                record = Videos(
+                    video_id       = video.video_id,
+                    channel_handle = channel.channel_handle,
+                    download_path  = output_path,
+                    is_downloaded  = True,
+                    is_watched     = False,
+                    publish_date   = publish_date,
+                    added_at       = date_in_gmt(),
+                    thumbnail_url  = thumbnail_url,
+                    title          = title,
+                    size           = size,
+                    variants       = [],
+                    subtitles      = subtitles,
+                    chapters       = chapters,
+                )
+            else:
+                logger.info(f"Listing '{video.title}' (stream-only)")
+                try:
+                    title, thumbnail_url, publish_date = self.fetch_video_metadata(video.video_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not fetch metadata for '{video.title}' ({video.video_id}): "
+                        f"{self._explain_ydl_error(exc)}"
+                    )
+                    if self._is_permanent_error(exc):
+                        new_start = video.video_id
+                        continue
+                    break
+
+                record = Videos(
+                    video_id       = video.video_id,
+                    channel_handle = channel.channel_handle,
+                    download_path  = "",
+                    is_downloaded  = False,
+                    is_watched     = False,
+                    publish_date   = publish_date,
+                    added_at       = date_in_gmt(),
+                    thumbnail_url  = thumbnail_url,
+                    title          = title,
+                    size           = 0,
                 )
 
-                if _transcode_args:
-                    t = threading.Thread(
-                        target=self._transcode_video,
-                        args=_transcode_args,
-                        daemon=True,
-                        name=f"transcode-{_transcode_args[0]}",
-                    )
-                    t.start()
+            self.database_handler.add_video_to_videos(video=record)
+            if record.is_downloaded:
+                self._report_done(video.video_id, record.title)
+            self._flag_video_watched(
+                video_id          = video.video_id,
+                watched_videos_uid = channel.watched_videos_uid,
+            )
+            new_start = video.video_id
 
-            if new_videos:
-                self.database_handler.update_video_starting_point_id(
-                    channel_handle          = channel.channel_handle,
-                    video_starting_point_id = new_videos[-1].video_id,
+            if _transcode_args:
+                t = threading.Thread(
+                    target=self._transcode_video,
+                    args=_transcode_args,
+                    daemon=True,
+                    name=f"transcode-{_transcode_args[0]}",
                 )
+                t.start()
 
-            self.database_handler.update_channel_last_checked(channel.channel_handle)
+        if new_start != channel.video_starting_point_id:
+            self.database_handler.update_video_starting_point_id(
+                channel_handle          = channel.channel_handle,
+                video_starting_point_id = new_start,
+            )
+
+        self.database_handler.update_channel_last_checked(channel.channel_handle)
 
     def search_channel(self, channel_handle: str) -> dict | None:
         url  = f"{self.YOUTUBE_BASE}/@{channel_handle}"
-        opts = {"quiet": True, "extract_flat": True, "playlist_items": "0"}
+        opts = {**self._ydl_common_opts(), "extract_flat": True, "playlist_items": "0"}
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = self._with_retries(
+                lambda: self._extract_info(opts, url), f"Channel lookup for '@{channel_handle}'"
+            )
         except Exception as exc:
             logger.warning(
                 f"Channel lookup failed for '@{channel_handle}': {self._explain_ydl_error(exc)}"
@@ -364,20 +478,92 @@ class NYT:
         return deleted
 
     def get_channel_last_videos(self, channel_handle: str) -> list[_VideoEntry]:
-        url  = f"{self.YOUTUBE_BASE}/@{channel_handle}/videos"
+        return self._fetch_channel_videos(channel_handle)[1]
+
+    @staticmethod
+    def _is_not_found(exc: BaseException | None) -> bool:
+        msg = str(exc).lower()
+        return "http error 404" in msg or "requested entity was not found" in msg
+
+    def _fetch_channel_listing(self, channel: Channels) -> tuple[dict, list[_VideoEntry]]:
+        """
+        Fetch a tracked channel's recent uploads, surviving handle changes.
+        Channels with a stored id are fetched by id (stable). Older rows without one fall back
+        to the handle, and if it 404s (renamed) the id is recovered from the last-seen video.
+        """
+        try:
+            return self._fetch_channel_videos(channel.channel_handle, channel.channel_id or "")
+        except RuntimeError as exc:
+            if channel.channel_id or not self._is_not_found(exc.__cause__):
+                raise
+
+        channel_id = self._channel_id_from_video(channel.video_starting_point_id)
+        if not channel_id:
+            raise RuntimeError(
+                f"'@{channel.channel_handle}' no longer resolves and its new handle couldn't be "
+                "determined automatically. If the channel changed its handle, remove it and track "
+                "it again under the new one."
+            )
+        logger.info(f"'@{channel.channel_handle}' no longer resolves; recovered its channel id ({channel_id}) from its last video")
+        return self._fetch_channel_videos(channel.channel_handle, channel_id)
+
+    def _channel_id_from_video(self, video_id: str | None) -> str:
+        if not video_id:
+            return ""
+        url = f"{self.YOUTUBE_BASE}/watch?v={video_id}"
+        try:
+            info = self._with_retries(
+                lambda: self._extract_info({**self._ydl_common_opts(), "skip_download": True}, url),
+                f"Channel id lookup via {video_id}",
+            )
+        except Exception as exc:
+            logger.warning(f"Could not look up the channel of video {video_id}: {self._explain_ydl_error(exc)}")
+            return ""
+        return (info or {}).get("channel_id") or ""
+
+    def _sync_channel_identity(self, channel: Channels, meta: dict) -> None:
+        """Persist the channel id, and follow the channel if it changed its handle."""
+        channel_id = meta.get("channel_id") or ""
+        if channel_id and channel_id != (channel.channel_id or ""):
+            self.database_handler.set_channel_id(channel.channel_handle, channel_id)
+            channel.channel_id = channel_id
+
+        new_handle = meta.get("handle") or ""
+        old_handle = channel.channel_handle
+        if not new_handle or new_handle.lower() == old_handle.lower():
+            return
+        if self.database_handler.check_channel_tracked(new_handle):
+            logger.warning(f"'@{old_handle}' is now '@{new_handle}', which is already tracked — leaving both as they are")
+            return
+
+        self.database_handler.rename_channel_handle(old_handle, new_handle, channel_name=meta.get("name"))
+        avatar = Path(self.config.AVATARS_DIRECTORY) / f"{old_handle}.jpg"
+        if avatar.exists():
+            os.replace(avatar, avatar.with_name(f"{new_handle}.jpg"))
+        channel.channel_handle = new_handle
+        logger.info(f"Channel '@{old_handle}' changed its handle to '@{new_handle}' — updated automatically")
+
+    def _fetch_channel_videos(self, channel_handle: str, channel_id: str = "") -> tuple[dict, list[_VideoEntry]]:
+        if channel_id:
+            url = f"{self.YOUTUBE_BASE}/channel/{channel_id}/videos"
+        else:
+            url = f"{self.YOUTUBE_BASE}/@{channel_handle}/videos"
         opts = {
-            "quiet":        True,
+            **self._ydl_common_opts(),
             "extract_flat": True,
             "playlistend":  50,
-            "ignoreerrors": True,
         }
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = self._with_retries(
+                lambda: self._extract_info(opts, url), f"Video list for '@{channel_handle}'"
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Could not fetch video list for '@{channel_handle}': {self._explain_ydl_error(exc)}"
             ) from exc
+
+        if not info:
+            raise RuntimeError(f"Could not fetch video list for '@{channel_handle}': empty response from YouTube")
 
         entries = [e for e in (info.get("entries") or []) if e and e.get("id")]
         if not entries:
@@ -388,54 +574,97 @@ class NYT:
 
         videos = [_VideoEntry(video_id=e["id"], title=e.get("title") or e["id"]) for e in entries]
         logger.debug(f"Fetched {len(videos)} videos for '@{channel_handle}'")
-        return videos
+        meta = {
+            "channel_id": info.get("channel_id") or info.get("id") or "",
+            # uploader_id is "@handle" for channels that have one, otherwise the bare channel id
+            "handle":     (info.get("uploader_id") or "")[1:] if (info.get("uploader_id") or "").startswith("@") else "",
+            "name":       info.get("channel") or "",
+        }
+        return meta, videos
 
-    def download_video(self, video_id: str, prefix_directory: str) -> tuple:
+    @staticmethod
+    def _report_done(video_id: str, title: str | None) -> None:
+        """Mark a download finished. Called only once the library row exists, so the UI's refresh finds it."""
+        from nyt.src.api.download_state import update_progress
+        update_progress(video_id, {"title": title or video_id, "percent": 100, "status": "finished"})
+
+    @staticmethod
+    def _report_failed(video_id: str, title: str | None) -> None:
+        from nyt.src.api.download_state import update_progress
+        update_progress(video_id, {"title": title or video_id, "status": "error"})
+
+    def download_video(
+        self, video_id: str, prefix_directory: str,
+        max_height: int | None = DEFAULT_MAX_HEIGHT, overwrite: bool = False,
+    ) -> tuple:
         from nyt.src.api.download_state import update_progress
 
-        def _hook(d: dict) -> None:
-            status = d.get("status")
-            title  = d.get("info_dict", {}).get("title", video_id)
-            if status == "downloading":
-                dl    = d.get("downloaded_bytes") or 0
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                update_progress(video_id, {
-                    "title":   title,
-                    "percent": round(dl / total * 100, 1) if total else 0,
-                    "speed":   d.get("speed") or 0,
-                    "eta":     d.get("eta"),
-                    "status":  "downloading",
-                })
-            elif status == "finished":
-                update_progress(video_id, {"title": title, "percent": 100, "status": "finished"})
-            elif status == "error":
-                update_progress(video_id, {"title": title, "status": "error"})
+        state = {"title": video_id, "plan_total": 0, "streams": {}, "filepath": None}
+
+        def _progress(d: dict) -> None:
+            fname = d.get("filename") or ""
+            if d.get("status") not in ("downloading", "finished") or fname.endswith(".vtt"):
+                return
+            done = d.get("downloaded_bytes") or 0
+            if d["status"] == "finished":
+                done = d.get("total_bytes") or done
+            state["streams"][fname] = done
+
+            # One combined bar across the video and audio streams, not one 0-100% per stream.
+            total      = state["plan_total"] or d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            downloaded = sum(state["streams"].values())
+            speed      = d.get("speed") or 0
+            update_progress(video_id, {
+                "title":   state["title"],
+                "percent": min(round(downloaded / total * 100, 1), 99) if total else 0,
+                "speed":   speed,
+                "eta":     int((total - downloaded) / speed) if total and speed else None,
+                "status":  "downloading",
+            })
+
+        def _postprocess(d: dict) -> None:
+            if d.get("postprocessor") == "Merger" and d.get("status") == "started":
+                update_progress(video_id, {"title": state["title"], "percent": 99, "status": "merging"})
+            elif d.get("postprocessor") == "MoveFiles" and d.get("status") == "finished":
+                state["filepath"] = (d.get("info_dict") or {}).get("filepath")
 
         opts = {
-            **self._ydl_base_opts(),
-            "outtmpl":           str(Path(prefix_directory) / "%(uploader)s" / "%(title)s.%(ext)s"),
-            "writesubtitles":    True,
-            "subtitleslangs":    ["all"],
-            "subtitlesformat":   "vtt",
-            "writeautomaticsub": False,
-            "progress_hooks":    [_hook],
+            **self._ydl_base_opts(max_height),
+            "outtmpl":             str(Path(prefix_directory) / "%(uploader)s" / "%(title)s.%(ext)s"),
+            "writesubtitles":      True,
+            "subtitleslangs":      ["all"],
+            "subtitlesformat":     "vtt",
+            "writeautomaticsub":   False,
+            "progress_hooks":      [_progress],
+            "postprocessor_hooks": [_postprocess],
+            "overwrites":          overwrite,   # re-download over an existing file
         }
         video_url = f"{self.YOUTUBE_BASE}/watch?v={video_id}"
 
-        import time as _time
-        _t0 = _time.monotonic()
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info      = ydl.extract_info(video_url, download=False)
-            ydl.download([video_url])
-            file_name     = ydl.prepare_filename(info)
-            title         = info.get("title")
-            thumbnail_url = info.get("thumbnail")
-            publish_date  = datetime.strptime(info["upload_date"], "%Y%m%d")
-            size          = Path(file_name).stat().st_size
-            height        = info.get("height") or 0
-            elapsed       = _time.monotonic() - _t0
-            size_mb       = size / 1024 ** 2
-            logger.info(f"Downloaded '{title}' — {size_mb:.1f} MB, {height}p, {elapsed:.0f}s")
+        _t0 = time.monotonic()
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                # Extract once, then download from that result (no second page/player request).
+                info = ydl.extract_info(video_url, download=False)
+                state["title"] = info.get("title") or video_id
+                streams = info.get("requested_formats") or [info]
+                state["plan_total"] = sum(f.get("filesize") or f.get("filesize_approx") or 0 for f in streams)
+                update_progress(video_id, {"title": state["title"], "percent": 0, "status": "downloading"})
+
+                ydl.process_info(info)
+
+                file_name     = state["filepath"] or ydl.prepare_filename(info)
+                title         = info.get("title")
+                thumbnail_url = info.get("thumbnail")
+                publish_date  = datetime.strptime(info["upload_date"], "%Y%m%d")
+                size          = Path(file_name).stat().st_size
+                height        = info.get("height") or 0
+                elapsed       = time.monotonic() - _t0
+                size_mb       = size / 1024 ** 2
+                logger.info(f"Downloaded '{title}' - {size_mb:.1f} MB, {height}p, {elapsed:.0f}s")
+        except Exception:
+            self._report_failed(video_id, state["title"])
+            raise
 
         # Collect subtitle VTT files written alongside the video
         subtitles = self._collect_subtitles(file_name)
@@ -452,8 +681,9 @@ class NYT:
 
     def fetch_video_metadata(self, video_id: str) -> tuple[str, str, datetime]:
         url = f"{self.YOUTUBE_BASE}/watch?v={video_id}"
-        with yt_dlp.YoutubeDL(self._ydl_common_opts()) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = self._with_retries(
+            lambda: self._extract_info(self._ydl_common_opts(), url), f"Metadata fetch for {video_id}"
+        )
         return (
             info.get("title", video_id),
             info.get("thumbnail", ""),
@@ -497,120 +727,173 @@ class NYT:
 
     def _flag_video_watched(self, video_id: str, watched_videos_uid: str) -> None:
         row = self.database_handler.get_watched_videos_row(watched_videos_uid=watched_videos_uid)
+        if row is None or video_id in row.watched_videos["ids"]:
+            return
         self.database_handler.add_video_id_to_watched_videos(
             video_id           = video_id,
             watched_videos_uid = watched_videos_uid,
             watched_videos     = row.watched_videos,
         )
 
-    def _transcode_video(self, video_id: str, source_path: str, source_height: int) -> None:
+    # ── Local quality variants (for bandwidth-friendly self-hosted streaming) ───
+
+    TRANSCODE_HEIGHTS  = (720, 480, 360, 240)          # built automatically when transcoding is enabled
+    ON_DEMAND_HEIGHTS  = (1080, 720, 480, 360, 240)    # can be requested per video from the UI
+
+    _transcode_lock     = threading.Lock()   # one ffmpeg at a time
+    _backfill_running   = False
+    _transcode_checked: set[str] = set()     # videos already considered by the backfill this run
+
+    @classmethod
+    def wants_transcode(cls, source_height: int | None) -> bool:
+        return bool(source_height) and any(h < source_height for h in cls.TRANSCODE_HEIGHTS)
+
+    @staticmethod
+    def _probe_video(path: str) -> tuple[float, int]:
+        """Return (duration_seconds, height) of the file's first video stream."""
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=height:format=duration",
+                "-of", "json", path,
+            ],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        data = json.loads(out.stdout)
+        return float(data["format"]["duration"]), int(data["streams"][0]["height"])
+
+    def start_transcode_backfill(self) -> None:
+        """
+        Queue local quality variants for already-downloaded videos that have none.
+        Cheap to call every watcher cycle: it's a no-op while one is running, and
+        each video is only considered once per process.
+        """
+        if NYT._backfill_running:
+            return
+        NYT._backfill_running = True
+        threading.Thread(target=self._transcode_backfill, daemon=True, name="transcode-backfill").start()
+
+    def _transcode_backfill(self) -> None:
+        try:
+            for video in self.database_handler.get_videos_list():
+                if (
+                    not video.is_downloaded or not video.download_path or video.variants
+                    or video.video_id in NYT._transcode_checked
+                    or not Path(video.download_path).exists()
+                ):
+                    continue
+                NYT._transcode_checked.add(video.video_id)
+                self._transcode_video(video.video_id, video.download_path)
+        except Exception:
+            logger.exception("Quality-variant backfill failed")
+        finally:
+            NYT._backfill_running = False
+
+    def _transcode_video(self, video_id: str, source_path: str, heights: list[int] | None = None) -> None:
         from nyt.src.api.download_state import update_progress
 
-        TARGETS = [720, 480, 360]
-        targets = [h for h in TARGETS if h < source_height]
-        if not targets:
-            return
-
-        logger.info(f"Transcoding '{video_id}' → {', '.join(f'{h}p' for h in targets)} (source: {source_height}p)")
-
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    source_path,
-                ],
-                capture_output=True, text=True, timeout=30,
-            )
-            total_seconds = float(result.stdout.strip())
-        except Exception as exc:
-            logger.warning(f"ffprobe failed for '{video_id}': {exc}")
-            return
-
-        source   = Path(source_path)
-        variants = list(self.database_handler.get_video_from_videos(video_id).variants or [])
-
-        for height in targets:
-            out_path     = source.parent / f"{source.stem}_{height}p.mp4"
-            progress_key = f"{video_id}_{height}p"
-
-            update_progress(progress_key, {
-                "title":    f"{height}p — {source.stem[:40]}",
-                "percent":  0,
-                "status":   "transcoding",
-                "video_id": video_id,
-            })
+        with NYT._transcode_lock:
+            video = self.database_handler.get_video_from_videos(video_id)
+            if not video or not video.is_downloaded or not Path(source_path).exists():
+                return
 
             try:
+                total_seconds, source_height = self._probe_video(source_path)
+            except Exception as exc:
+                logger.warning(f"ffprobe failed for '{video_id}': {exc}")
+                return
+
+            existing = {
+                v.get("height") for v in (video.variants or [])
+                if v.get("path") and Path(v["path"]).exists()
+            }
+            wanted  = heights or self.TRANSCODE_HEIGHTS
+            targets = [h for h in wanted if h < source_height and h not in existing]
+            if not targets:
+                return
+
+            logger.info(
+                f"Transcoding '{video_id}' -> {', '.join(f'{h}p' for h in targets)} (source: {source_height}p)"
+            )
+            source = Path(source_path)
+            for height in targets:
+                self._transcode_one(video_id, source, height, total_seconds, update_progress)
+
+    def _transcode_one(self, video_id: str, source: Path, height: int, total_seconds: float, update_progress) -> None:
+        out_path     = source.parent / f"{source.stem}_{height}p.mp4"
+        part_path    = source.parent / f"{source.stem}_{height}p.part.mp4"
+        progress_key = f"{video_id}_{height}p"
+        title        = f"{height}p — {source.stem[:40]}"
+
+        def _progress(status: str, **extra) -> None:
+            update_progress(progress_key, {"title": title, "status": status, "video_id": video_id, **extra})
+
+        _progress("transcoding", percent=0)
+
+        try:
+            with tempfile.TemporaryFile(mode="w+") as err_file:
                 proc = subprocess.Popen(
                     [
-                        "ffmpeg", "-y",
-                        "-i",       source_path,
-                        "-vf",      f"scale=-2:{height}",
-                        "-c:v",     "libx264",
-                        "-crf",     "23",
-                        "-preset",  "fast",
-                        "-c:a",     "aac",
-                        "-b:a",     "128k",
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-i",        str(source),
+                        "-vf",       f"scale=-2:{height}",
+                        "-c:v",      "libx264",
+                        "-crf",      "23",
+                        "-preset",   "fast",
+                        "-c:a",      "aac",
+                        "-b:a",      "128k",
+                        "-movflags", "+faststart",
                         "-progress", "pipe:1",
                         "-nostats",
-                        str(out_path),
+                        str(part_path),
                     ],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=err_file,
                     text=True,
+                    # Keep the machine responsive while a long transcode runs.
+                    creationflags=0x00004000 if os.name == "nt" else 0,   # BELOW_NORMAL_PRIORITY_CLASS
+                    preexec_fn=(lambda: os.nice(10)) if os.name != "nt" else None,
                 )
 
                 for line in proc.stdout:
                     line = line.strip()
                     if line.startswith("out_time_us="):
                         try:
-                            us      = int(line.split("=", 1)[1])
-                            elapsed = us / 1_000_000
-                            pct     = min(round(elapsed / total_seconds * 100, 1), 99)
-                            update_progress(progress_key, {
-                                "title":    f"{height}p — {source.stem[:40]}",
-                                "percent":  pct,
-                                "status":   "transcoding",
-                                "video_id": video_id,
-                            })
+                            elapsed = int(line.split("=", 1)[1]) / 1_000_000
+                            _progress("transcoding", percent=min(round(elapsed / total_seconds * 100, 1), 99))
                         except (ValueError, ZeroDivisionError):
                             pass
 
                 proc.wait()
+                err_file.seek(0)
+                err_tail = err_file.read()[-500:].strip()
 
-                if proc.returncode == 0 and out_path.exists():
-                    size = out_path.stat().st_size
-                    variants.append({
-                        "height": height,
-                        "label":  f"{height}p",
-                        "path":   str(out_path),
-                        "size":   size,
-                    })
-                    self.database_handler.update_videos_values(
-                        video_id=video_id,
-                        values={"variants": variants},
-                    )
-                    update_progress(progress_key, {
-                        "title":    f"{height}p — {source.stem[:40]}",
-                        "percent":  100,
-                        "status":   "finished",
-                        "video_id": video_id,
-                    })
-                    logger.info(f"Transcoded '{video_id}' → {height}p at '{out_path}'")
-                else:
-                    update_progress(progress_key, {
-                        "title":    f"{height}p — {source.stem[:40]}",
-                        "status":   "error",
-                        "video_id": video_id,
-                    })
-                    logger.warning(f"FFmpeg exited with error for '{video_id}' at {height}p")
+            if proc.returncode != 0 or not part_path.exists():
+                _progress("error")
+                logger.warning(f"FFmpeg failed for '{video_id}' at {height}p: {err_tail or 'no error output'}")
+                return
 
-            except Exception as exc:
-                update_progress(progress_key, {
-                    "title":    f"{height}p — {source.stem[:40]}",
-                    "status":   "error",
-                    "video_id": video_id,
-                })
-                logger.warning(f"Transcoding error for '{video_id}' at {height}p: {exc}")
+            # Re-read the row now: the video may have been deleted or re-downloaded while we encoded.
+            current = self.database_handler.get_video_from_videos(video_id)
+            if not current or not current.is_downloaded:
+                logger.info(f"'{video_id}' was removed during transcoding; discarding {height}p")
+                return
+
+            os.replace(part_path, out_path)
+            variants = [v for v in (current.variants or []) if v.get("height") != height]
+            variants.append({
+                "height": height,
+                "label":  f"{height}p",
+                "path":   str(out_path),
+                "size":   out_path.stat().st_size,
+            })
+            variants.sort(key=lambda v: v["height"], reverse=True)
+            self.database_handler.update_videos_values(video_id=video_id, values={"variants": variants})
+            _progress("finished", percent=100)
+            logger.info(f"Transcoded '{video_id}' -> {height}p at '{out_path}'")
+
+        except Exception as exc:
+            _progress("error")
+            logger.warning(f"Transcoding error for '{video_id}' at {height}p: {exc}")
+        finally:
+            part_path.unlink(missing_ok=True)

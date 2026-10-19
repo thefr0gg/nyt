@@ -631,6 +631,7 @@
   </div>
 </div>
 
+<script src="/static/dropdown.js"></script>
 <script>
   // ── CONFIRM DIALOG ───────────────────────────────────────
 
@@ -842,6 +843,13 @@
           </button>
         </div>
         <div class="toggle-row">
+          <span class="toggle-label"><strong>Max quality</strong> to download</span>
+          <select class="delay-input" style="width:auto;" onchange="saveMaxHeight('${esc(ch.channel_handle)}', this.value)">
+            ${[[480, '480p'], [720, '720p'], [1080, '1080p'], [1440, '1440p'], [2160, '4K'], [0, 'Best available']]
+              .map(([h, label]) => `<option value="${h}" ${(ch.max_height ?? 1080) === h ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="toggle-row">
           <span class="toggle-label"><strong>Auto-download</strong> new videos</span>
           <label class="toggle" title="${autoDownload ? 'Downloads enabled' : 'Stream-only mode'}">
             <input type="checkbox" id="${esc(toggleId)}" ${autoDownload ? 'checked' : ''}
@@ -850,6 +858,20 @@
           </label>
         </div>
       </div>`;
+  }
+
+  async function saveMaxHeight(handle, value) {
+    try {
+      const res = await apiFetch(`/api/v1/channels/${encodeURIComponent(handle)}/max-height`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_height: parseInt(value, 10) }),
+      });
+      if (!res.ok) throw new Error();
+      showToast(value === '0' ? 'Quality cap removed' : `Max quality set to ${value}p`);
+    } catch (e) {
+      if (e.message !== 'unauthenticated') showToast('Failed to save');
+    }
   }
 
   async function saveAutoDownload(handle, enabled) {

@@ -22,6 +22,7 @@ class TrackedChannels:
                 "video_count":              self.database_handler.count_channel_videos(ch.channel_handle),
                 "watch_delay_minutes":      ch.watch_delay_minutes,
                 "auto_download":            ch.auto_download if ch.auto_download is not None else True,
+                "max_height":               ch.max_height if ch.max_height is not None else 1080,
                 "last_checked_at":          ch.last_checked_at.isoformat() if ch.last_checked_at else None,
                 "added_at":                 ch.added_at.isoformat() if ch.added_at else None,
             })

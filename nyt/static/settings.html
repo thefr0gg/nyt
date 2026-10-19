@@ -1011,19 +1011,39 @@
     const data = await res.json();
 
     if (data.ok) {
-      showToast('Update started — check back in a moment');
-      setTimeout(() => {
-        const notice = document.getElementById('update-restart-notice');
-        notice.style.display = 'flex';
-        btn.style.display = 'none';
-        lucide.createIcons();
-      }, 8000);
+      showToast('Update started — this can take a minute');
+      pollUpdateStatus(btn);
     } else {
       showToast(data.message || 'Update failed', true);
       btn.disabled = false;
       btn.innerHTML = '<i data-lucide="download" size="14"></i> Update now';
       lucide.createIcons();
     }
+  }
+
+  // Poll the server until the update finishes, then show the real outcome.
+  async function pollUpdateStatus(btn) {
+    for (let i = 0; i < 150; i++) {            // up to ~5 minutes
+      await new Promise(r => setTimeout(r, 2000));
+      const res = await apiFetch('/api/v1/update/status');
+      if (!res) continue;
+      const st = await res.json();
+      if (st.running) continue;
+      if (st.last_result === 'success') {
+        document.getElementById('update-restart-notice').style.display = 'flex';
+        btn.style.display = 'none';
+        lucide.createIcons();
+        showToast(st.message || 'Update installed — restart nyt to apply it');
+      } else {
+        showToast(st.message || 'Update failed', true);
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="download" size="14"></i> Update now';
+        lucide.createIcons();
+      }
+      return;
+    }
+    btn.disabled = false;
+    showToast('Update is taking longer than expected — check the nyt logs', true);
   }
 
   // ── Init ──────────────────────────────────────────────

@@ -16,3 +16,5 @@ class Channels:
     last_checked_at:            datetime | None = None
     auto_download:              bool | None = True
     added_at:                   datetime | None = None
+    max_height:                 int = 1080          # download quality cap in pixels; 0 = no cap
+    channel_id:                 str | None = ""   # permanent YouTube id; survives handle changes

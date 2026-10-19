@@ -390,6 +390,25 @@
       font-weight: 700;
     }
 
+    #dl-header { cursor: pointer; user-select: none; }
+
+    #dl-toggle {
+      margin-left: auto;
+      background: none;
+      border: 0;
+      padding: 2px;
+      color: inherit;
+      display: flex;
+      cursor: pointer;
+    }
+    #dl-toggle svg { width: 18px; height: 18px; transition: transform 0.2s ease; }
+    #dl-panel.min #dl-toggle svg { transform: rotate(180deg); }
+
+    #dl-mini { display: none; height: 5px; background: var(--shadow); overflow: hidden; }
+    #dl-mini .dl-bar { border-radius: 0; }
+    #dl-panel.min #dl-mini { display: block; }
+    #dl-panel.min #dl-list { display: none; }
+
     .dl-item {
       padding: 11px 14px;
       border-top: 1.5px solid var(--shadow);
@@ -487,6 +506,126 @@
       margin: 3px 0;
     }
 
+    #ctx-menu { max-height: calc(100vh - 16px); overflow-y: auto; }
+
+    /* ── PIN BADGE ─────────────────────────────────────── */
+    .pin-badge {
+      position: absolute;
+      top: 7px;
+      left: 8px;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #ffd166;
+      border: 2px solid var(--ink);
+      border-radius: 50%;
+      color: var(--ink);
+    }
+
+    /* ── DETAILS DIALOG ────────────────────────────────── */
+    .dlg-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(45, 43, 38, 0.45);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    .dlg {
+      width: 100%;
+      max-width: 560px;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      background: var(--surface);
+      border: 2.5px solid var(--ink);
+      border-radius: var(--radius-card);
+      box-shadow: 6px 6px 0 var(--shadow);
+      animation: ctx-pop 0.14s ease;
+    }
+
+    .dlg-head {
+      position: sticky;
+      top: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--ink);
+      color: var(--surface);
+      font-family: var(--font-hand);
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .dlg-head span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .dlg-x {
+      background: none;
+      border: 0;
+      color: inherit;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 2px 6px;
+    }
+
+    .dlg-sec { padding: 14px 16px; border-top: 1.5px solid var(--shadow); }
+    .dlg-sec:first-child { border-top: 0; }
+    .dlg-sec h3 { font-family: var(--font-hand); font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+    .dlg-note { font-size: 12.5px; font-weight: 600; color: var(--muted); line-height: 1.5; margin-top: 8px; }
+    .dlg-warn { font-size: 13px; font-weight: 700; color: #c94040; margin-bottom: 8px; }
+
+    .dlg-row { display: flex; gap: 10px; font-size: 13.5px; padding: 3px 0; }
+    .dlg-row .k { width: 96px; flex-shrink: 0; color: var(--muted); font-weight: 700; }
+    .dlg-row .v { flex: 1; min-width: 0; font-weight: 600; word-break: break-word; }
+    .dlg-row .v.mono { font-family: monospace; font-size: 12px; }
+
+    .dlg-variant {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 0;
+      font-size: 13.5px;
+      font-weight: 600;
+    }
+    .dlg-variant .name { flex: 1; }
+    .dlg-variant .size { color: var(--muted); }
+
+    .dlg-btn {
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+      background: var(--surface);
+      border: 2px solid var(--ink);
+      border-radius: var(--radius-pill);
+      padding: 4px 14px;
+      cursor: pointer;
+      box-shadow: 2px 2px 0 var(--shadow);
+    }
+    .dlg-btn:hover:not(:disabled) { border-color: var(--coral); color: var(--coral); }
+    .dlg-btn:disabled { opacity: 0.5; cursor: default; }
+    .dlg-btn.primary { background: var(--coral); color: #fff; }
+    .dlg-btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.05); }
+    .dlg-btn.danger { color: #c94040; }
+
+    .dlg-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+    .dlg-select {
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+      background: var(--surface);
+      border: 2px solid var(--ink);
+      border-radius: 8px;
+      padding: 4px 8px;
+    }
+
     /* ── TOAST ─────────────────────────────────────────── */
     #toast {
       position: fixed;
@@ -561,11 +700,25 @@
 <div id="ctx-menu" role="menu" aria-label="Video options"></div>
 <div id="toast"></div>
 
+<div id="dlg-overlay" class="dlg-overlay" style="display:none" onclick="if (event.target === this) closeDetails()">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+    <div class="dlg-head">
+      <span id="dlg-title">Details</span>
+      <button class="dlg-x" type="button" onclick="closeDetails()" aria-label="Close">✕</button>
+    </div>
+    <div id="dlg-body"></div>
+  </div>
+</div>
+
 <div id="dl-panel" style="display:none">
   <div id="dl-header">
     <i data-lucide="download" style="width:16px;height:16px;flex-shrink:0"></i>
     <span id="dl-title">Downloading</span>
+    <button id="dl-toggle" type="button" aria-label="Minimize downloads" aria-expanded="true">
+      <i data-lucide="chevron-down"></i>
+    </button>
   </div>
+  <div id="dl-mini"><div id="dl-mini-bar" class="dl-bar" style="width:0%"></div></div>
   <div id="dl-list"></div>
 </div>
 
@@ -591,13 +744,20 @@
       <option value="all">All</option>
       <option value="unwatched">Unwatched only</option>
     </select>
+    <label>Channel</label>
+    <select id="channel-by" onchange="onChannelSelect(this.value)">
+      <option value="">All channels</option>
+    </select>
   </div>
   <div id="root"></div>
 </main>
 
+<script src="/static/dropdown.js"></script>
 <script>
   const root = document.getElementById('root');
   let allVideos = [];
+  let channelFilter = null;   // channel_handle to show, or null for all
+  let lastRendered  = [];     // videos in the order they're currently shown (for "mark all above")
 
   /* ── Fetch wrapper: redirect to /login on 401 ──────────── */
   async function apiFetch(url, options = {}) {
@@ -651,6 +811,7 @@
           <div class="watched-badge">
             <i data-lucide="check" style="width:13px;height:13px;"></i>
           </div>
+          ${v.is_pinned ? `<div class="pin-badge" title="Pinned"><i data-lucide="pin" style="width:12px;height:12px;"></i></div>` : ''}
           ${!v.is_downloaded ? `<div class="stream-badge"><i data-lucide="wifi" style="width:11px;height:11px;"></i> Stream</div>` : ''}
         </div>
         <div class="card-body">
@@ -669,9 +830,12 @@
     const filter = document.getElementById('filter-by').value;
     const query  = (document.getElementById('search-input')?.value || '').trim().toLowerCase();
 
+    populateChannelFilter();
+
     let videos = [...allVideos];
 
     if (filter === 'unwatched') videos = videos.filter(v => !v.is_watched);
+    if (channelFilter) videos = videos.filter(v => v.channel_handle === channelFilter);
 
     if (query) {
       videos = videos.filter(v =>
@@ -688,6 +852,10 @@
     } else if (sort === 'unwatched') {
       videos.sort((a, b) => a.is_watched - b.is_watched);
     }
+
+    // Pinned ("watch later") videos always come first; sort() is stable so the chosen order holds within each group.
+    videos.sort((a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0));
+    lastRendered = videos;
 
     if (videos.length === 0) {
       const [icon, title, body] = query
@@ -707,6 +875,50 @@
 
     root.innerHTML = `<div class="grid">${videos.map(card).join('')}</div>`;
     lucide.createIcons();
+  }
+
+  /* ── Channel filter ───────────────────────────────────── */
+  let _channelSig = '';
+
+  function populateChannelFilter() {
+    const sel = document.getElementById('channel-by');
+    if (!sel) return;
+
+    const byHandle = new Map();
+    for (const v of allVideos) {
+      const c = byHandle.get(v.channel_handle) || { handle: v.channel_handle, name: v.channel_name || v.channel_handle, count: 0 };
+      c.count++;
+      byHandle.set(v.channel_handle, c);
+    }
+    if (channelFilter && !byHandle.has(channelFilter)) channelFilter = null;   // its last video was removed
+
+    const list = [...byHandle.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const sig  = JSON.stringify(list);
+    if (sig !== _channelSig) {                                                // only rebuild when the set/counts change
+      _channelSig = sig;
+      const all = new Option('All channels', '');
+      all.dataset.hint = String(allVideos.length);
+      sel.replaceChildren(all, ...list.map(c => {
+        const o = new Option(c.name, c.handle);
+        o.dataset.hint = String(c.count);
+        return o;
+      }));
+    }
+
+    const want = channelFilter || '';
+    if (sel.value !== want) sel.value = want;
+    window.NytDropdown?.sync(sel);
+  }
+
+  function onChannelSelect(value) {
+    channelFilter = value || null;
+    renderVideos();
+  }
+
+  function setChannelFilter(handle) {   // used by the right-click "Go to channel"
+    channelFilter = handle;
+    renderVideos();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function onSearch() {
@@ -820,7 +1032,10 @@
       : `${secs}s`;
   }
 
+  let _dlLast = null;   // last progress payload, so toggling can redraw immediately
+
   function updateDownloadPanel(progress) {
+    _dlLast = progress;
     const panel  = document.getElementById('dl-panel');
     const list   = document.getElementById('dl-list');
     const header = document.getElementById('dl-title');
@@ -829,24 +1044,34 @@
     if (entries.length === 0) { panel.style.display = 'none'; return; }
 
     panel.style.display = '';
-    const nActive = entries.filter(([, d]) => d.status === 'downloading' || d.status === 'transcoding').length;
+    const nActive = entries.filter(([, d]) => ['downloading', 'merging', 'transcoding'].includes(d.status)).length;
     header.textContent  = nActive > 0 ? `Active (${nActive})` : 'Downloads';
+
+    // Collapsed view: one overall bar (average of the in-flight items) instead of the full list.
+    const live    = entries.map(([, d]) => d).filter(d => ['downloading', 'merging', 'transcoding'].includes(d.status));
+    const miniBar = document.getElementById('dl-mini-bar');
+    const busy    = live.some(d => d.status !== 'downloading');
+    const avg     = live.length ? live.reduce((a, d) => a + (d.percent ?? 0), 0) / live.length : 100;
+    miniBar.className   = busy ? 'dl-bar transcoding' : 'dl-bar';
+    miniBar.style.width = busy ? '' : `${Math.round(avg)}%`;
+    if (panel.classList.contains('min') && live.length && !busy) header.textContent += ` · ${Math.round(avg)}%`;
 
     list.innerHTML = entries.map(([vid, d]) => {
       const pct  = d.percent ?? 0;
       const meta = d.status === 'finished'    ? 'Done ✓'
                  : d.status === 'error'       ? 'Failed'
                  : d.status === 'transcoding' ? 'Transcoding…'
+                 : d.status === 'merging'     ? 'Merging video + audio…'
                  : [fmtSpeed(d.speed), fmtEta(d.eta)].filter(Boolean).join(' · ');
       const cls  = d.status === 'finished'    ? 'dl-bar done'
                  : d.status === 'error'       ? 'dl-bar error'
-                 : d.status === 'transcoding' ? 'dl-bar transcoding'
+                 : d.status === 'transcoding' || d.status === 'merging' ? 'dl-bar transcoding'
                  : 'dl-bar';
       return `
         <div class="dl-item">
           <div class="dl-title">${esc(d.title || vid)}</div>
-          <div class="dl-bar-wrap"><div class="${cls}" style="${d.status === 'transcoding' ? '' : `width:${pct}%`}"></div></div>
-          <div class="dl-meta">${d.status === 'transcoding' ? meta : `${Math.round(pct)}%${meta ? ' · ' + meta : ''}`}</div>
+          <div class="dl-bar-wrap"><div class="${cls}" style="${d.status === 'transcoding' || d.status === 'merging' ? '' : `width:${pct}%`}"></div></div>
+          <div class="dl-meta">${d.status === 'transcoding' || d.status === 'merging' ? meta : `${Math.round(pct)}%${meta ? ' · ' + meta : ''}`}</div>
         </div>`;
     }).join('');
 
@@ -861,6 +1086,27 @@
       }, 2000);
     }
   }
+
+  // Minimize / expand the download panel (remembered across reloads).
+  (function initDlPanelToggle() {
+    const panel  = document.getElementById('dl-panel');
+    const header = document.getElementById('dl-header');
+    const toggle = document.getElementById('dl-toggle');
+
+    function setMin(min) {
+      panel.classList.toggle('min', min);
+      toggle.setAttribute('aria-expanded', String(!min));
+      toggle.setAttribute('aria-label', min ? 'Expand downloads' : 'Minimize downloads');
+      try { localStorage.setItem('nyt.dlPanelMin', min ? '1' : '0'); } catch {}
+      if (_dlLast) updateDownloadPanel(_dlLast);
+    }
+
+    let stored = null;
+    try { stored = localStorage.getItem('nyt.dlPanelMin'); } catch {}
+    setMin(stored === '1');
+
+    header.addEventListener('click', () => setMin(!panel.classList.contains('min')));
+  })();
 
   function connectSSE() {
     if (_dlEs) _dlEs.close();
@@ -906,35 +1152,39 @@
     e.preventDefault();
     _ctxVideo = video;
 
-    const dl = !video.is_downloaded;
-    const dn = video.is_downloaded;
+    const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    const missingMeta = !video.video_title || !video.thumbnail_url;
     const sep = '<div class="ctx-sep"></div>';
+    const item = (action, icon, label, cls = '') =>
+      `<div class="ctx-item ${cls}" data-action="${action}">
+         <i data-lucide="${icon}" style="width:15px;height:15px"></i>${label}
+       </div>`;
 
-    ctxMenu.innerHTML = `
-      <div class="ctx-item" data-action="new-tab">
-        <i data-lucide="external-link" style="width:15px;height:15px"></i>Open in new tab
-      </div>
-      ${sep}
-      <div class="ctx-item" data-action="${video.is_watched ? 'unwatch' : 'watch'}">
-        <i data-lucide="${video.is_watched ? 'eye-off' : 'eye'}" style="width:15px;height:15px"></i>
-        ${video.is_watched ? 'Mark as unwatched' : 'Mark as watched'}
-      </div>
-      ${dl ? `${sep}<div class="ctx-item" data-action="download">
-        <i data-lucide="download" style="width:15px;height:15px"></i>Download
-      </div>` : ''}
-      ${dn ? `${sep}<div class="ctx-item" data-action="delete-file">
-        <i data-lucide="hard-drive" style="width:15px;height:15px"></i>Delete local file
-      </div>` : ''}
-      ${sep}
-      <div class="ctx-item" data-action="copy-url">
-        <i data-lucide="link" style="width:15px;height:15px"></i>Copy YouTube URL
-      </div>
-      ${sep}
-      <div class="ctx-item danger" data-action="remove">
-        <i data-lucide="trash-2" style="width:15px;height:15px"></i>Remove from library
-      </div>`;
+    ctxMenu.innerHTML = [
+      item('new-tab', 'external-link', 'Open in new tab'),
+      item('youtube', 'play', 'Open on YouTube'),
+      item('channel', 'user', 'Go to channel'),
+      sep,
+      item(video.is_watched ? 'unwatch' : 'watch', video.is_watched ? 'eye-off' : 'eye',
+           video.is_watched ? 'Mark as unwatched' : 'Mark as watched'),
+      item('watch-above', 'check-check', 'Mark all above as watched'),
+      item(video.is_pinned ? 'unpin' : 'pin', video.is_pinned ? 'pin-off' : 'pin',
+           video.is_pinned ? 'Unpin' : 'Pin to top (watch later)'),
+      sep,
+      item('details', 'info', 'Details…'),
+      video.is_downloaded
+        ? item('quality', 'layers', 'Quality versions…') + item('redownload', 'download', 'Re-download at…')
+        : item('download', 'download', 'Download') + item('redownload', 'download', 'Download at…'),
+      video.is_downloaded && isLocal ? item('reveal', 'folder-open', 'Show in folder') : '',
+      missingMeta ? item('refresh-meta', 'refresh-cw', 'Refresh metadata') : '',
+      sep,
+      item('copy-url', 'link', 'Copy YouTube URL'),
+      sep,
+      video.is_downloaded ? item('delete-file', 'hard-drive', 'Delete local file') : '',
+      item('remove', 'trash-2', 'Remove from library', 'danger'),
+    ].join('');
 
-    ctxMenu.style.display = '';
+    ctxMenu.style.display = 'block';   // the stylesheet default is display:none, so '' would leave it hidden
     lucide.createIcons();
 
     const mw = ctxMenu.offsetWidth;
@@ -996,6 +1246,67 @@
         break;
       }
 
+      case 'youtube':
+        window.open(`https://www.youtube.com/watch?v=${vid}`, '_blank', 'noopener');
+        break;
+
+      case 'channel':
+        setChannelFilter(video.channel_handle);
+        break;
+
+      case 'watch-above': {
+        const idx = lastRendered.findIndex(v => v.video_id === vid);
+        const ids = lastRendered.slice(0, Math.max(idx, 0)).filter(v => !v.is_watched).map(v => v.video_id);
+        if (ids.length === 0) { showToast('Nothing above to mark'); break; }
+        if (!confirm(`Mark the ${ids.length} unwatched video${ids.length > 1 ? 's' : ''} above this one as watched?`)) break;
+        const res = await apiFetch('/api/v1/videos/watched-bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_ids: ids, watched: true }),
+        });
+        if (res && res.ok) {
+          const set = new Set(ids);
+          allVideos.forEach(v => { if (set.has(v.video_id)) v.is_watched = true; });
+          renderVideos();
+          showToast(`Marked ${ids.length} as watched`);
+        } else showToast('Failed to update');
+        break;
+      }
+
+      case 'pin':
+      case 'unpin': {
+        const pinned = action === 'pin';
+        const res = await apiFetch(`/api/v1/videos/${encodeURIComponent(vid)}/pin`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned }),
+        });
+        if (res && res.ok) {
+          video.is_pinned = pinned;
+          renderVideos();
+          showToast(pinned ? 'Pinned to top' : 'Unpinned');
+        }
+        break;
+      }
+
+      case 'details':     openDetails(video, 'sec-info');     break;
+      case 'quality':     openDetails(video, 'sec-quality');  break;
+      case 'redownload':  openDetails(video, 'sec-download'); break;
+
+      case 'reveal': {
+        const res = await apiFetch(`/api/v1/videos/${encodeURIComponent(vid)}/reveal`, { method: 'POST' });
+        if (res && !res.ok) showToast((await res.json().catch(() => ({}))).message || 'Could not open the folder');
+        break;
+      }
+
+      case 'refresh-meta': {
+        showToast('Refreshing…');
+        const res = await apiFetch(`/api/v1/videos/${encodeURIComponent(vid)}/refresh-metadata`, { method: 'POST' });
+        if (res && res.ok) { await loadVideos(true); showToast('Metadata updated'); }
+        else if (res) showToast((await res.json().catch(() => ({}))).message || 'Could not refresh');
+        break;
+      }
+
       case 'copy-url':
         navigator.clipboard.writeText(`https://www.youtube.com/watch?v=${vid}`);
         showToast('URL copied');
@@ -1016,6 +1327,165 @@
     }
   }
 
+  /* ── Details / quality dialog ──────────────────────────── */
+  let _dlgVideo = null;
+  let _dlgTimer = null;
+  let _dlgSnapshot = '';
+
+  function fmtBytes(n) {
+    if (!n) return '—';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+  }
+
+  function fmtDuration(sec) {
+    if (!sec) return '';
+    sec = Math.round(sec);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function heightLabel(h) { return h === 0 ? 'Best available' : h === 2160 ? '4K (2160p)' : `${h}p`; }
+
+  async function openDetails(video, section) {
+    _dlgVideo = video;
+    _dlgSnapshot = '';
+    document.getElementById('dlg-title').textContent = video.video_title || video.video_id;
+    document.getElementById('dlg-body').innerHTML = '<div class="dlg-sec"><div class="dlg-note">Loading…</div></div>';
+    document.getElementById('dlg-overlay').style.display = 'flex';
+    await refreshDetails(section);
+    clearInterval(_dlgTimer);
+    _dlgTimer = setInterval(() => refreshDetails(), 3000);   // picks up newly built quality versions
+  }
+
+  function closeDetails() {
+    document.getElementById('dlg-overlay').style.display = 'none';
+    clearInterval(_dlgTimer);
+    _dlgVideo = null;
+  }
+
+  async function refreshDetails(scrollTo) {
+    if (!_dlgVideo) return;
+    const res = await apiFetch(`/api/v1/videos/${encodeURIComponent(_dlgVideo.video_id)}/details`);
+    if (!res || !_dlgVideo) return;
+    if (!res.ok) { document.getElementById('dlg-body').innerHTML = '<div class="dlg-sec"><div class="dlg-warn">Could not load details.</div></div>'; return; }
+    const d = await res.json();
+
+    const snap = JSON.stringify(d);
+    if (snap === _dlgSnapshot) return;                       // unchanged: don't disturb the open dropdown
+    const keepHeight = document.getElementById('dlg-height')?.value;
+    _dlgSnapshot = snap;
+
+    window.NytDropdown?.closeAll();   // the re-render replaces the select an open menu belongs to
+    document.getElementById('dlg-body').innerHTML = renderDetails(d);
+    const sel = document.getElementById('dlg-height');
+    if (sel && keepHeight !== undefined) sel.value = keepHeight;
+    lucide.createIcons();
+    if (scrollTo) document.getElementById(scrollTo)?.scrollIntoView({ block: 'start' });
+  }
+
+  function renderDetails(d) {
+    const pr = d.probe || {};
+    const res = pr.width && pr.height ? `${pr.width}×${pr.height}` : '';
+    const tech = [res, pr.codec, fmtDuration(pr.duration), pr.bitrate ? `${Math.round(pr.bitrate / 1000)} kb/s` : '']
+      .filter(Boolean).join(' · ');
+    const when = iso => iso ? new Date(iso).toLocaleString() : '—';
+    const row = (k, v, cls = '') => `<div class="dlg-row"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+
+    const info = `
+      <div class="dlg-sec" id="sec-info">
+        ${d.file_missing ? '<div class="dlg-warn">The file is missing from disk. Re-download it below.</div>' : ''}
+        ${row('Channel', esc(d.channel_name || d.channel_handle))}
+        ${row('Published', esc(d.publish_date ? new Date(d.publish_date).toLocaleDateString() : '—'))}
+        ${row('Added', esc(when(d.added_at)))}
+        ${row('Status', d.is_downloaded ? 'Downloaded' : 'Stream only (plays from YouTube)')}
+        ${d.is_downloaded ? row('Size', esc(fmtBytes(d.size))) : ''}
+        ${tech ? row('Video', esc(tech)) : ''}
+        ${d.path ? row('File', esc(d.path), 'mono') : ''}
+      </div>`;
+
+    let quality = '';
+    if (d.is_downloaded && !d.file_missing) {
+      const variants = d.variants.map(v => `
+        <div class="dlg-variant">
+          <span class="name">${esc(v.label)}</span><span class="size">${esc(fmtBytes(v.size))}</span>
+          <button class="dlg-btn danger" onclick="removeVariant(${v.height})">Remove</button>
+        </div>`).join('');
+      const generating = d.generating.map(h => `
+        <div class="dlg-variant"><span class="name">${h}p</span><span class="size">Creating…</span></div>`).join('');
+      const chips = d.available_heights.map(h =>
+        `<button class="dlg-btn" onclick="generateVariant(${h})">+ ${h}p</button>`).join('');
+      quality = `
+        <div class="dlg-sec" id="sec-quality">
+          <h3>Quality versions</h3>
+          <div class="dlg-variant"><span class="name">Original${pr.height ? ` (${pr.height}p)` : ''}</span><span class="size">${esc(fmtBytes(d.size))}</span></div>
+          ${variants}${generating}
+          ${chips ? `<div class="dlg-chips">${chips}</div>` : ''}
+          <div class="dlg-note">${chips || d.variants.length || d.generating.length
+            ? 'Lower-quality copies are built here from the original, so you can stream at a smaller size when bandwidth is tight. They show up in the player\'s quality menu.'
+            : 'The original is already at the smallest quality offered.'}</div>
+        </div>`;
+    }
+
+    const options = [0, 2160, 1440, 1080, 720, 480, 360]
+      .map(h => `<option value="${h}" ${h === d.channel_max_height ? 'selected' : ''}>${heightLabel(h)}</option>`).join('');
+    const busy = d.downloading;
+    const download = `
+      <div class="dlg-sec" id="sec-download">
+        <h3>${d.is_downloaded ? 'Re-download' : 'Download'} at quality</h3>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <select class="dlg-select" id="dlg-height" ${busy ? 'disabled' : ''}>${options}</select>
+          <button class="dlg-btn primary" onclick="startDownload()" ${busy ? 'disabled' : ''}>
+            ${busy ? 'Download in progress…' : d.is_downloaded ? 'Re-download' : 'Download'}
+          </button>
+        </div>
+        <div class="dlg-note">${d.is_downloaded
+          ? 'Replaces the current file and removes its quality versions. The channel default is preselected.'
+          : 'The channel default is preselected.'}</div>
+      </div>`;
+
+    return info + quality + download;
+  }
+
+  async function dlgCall(url, options, okMsg) {
+    const res = await apiFetch(url, options);
+    if (!res) return false;
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { showToast(body.message || 'Something went wrong'); return false; }
+    if (okMsg) showToast(okMsg);
+    return true;
+  }
+
+  async function generateVariant(height) {
+    if (!_dlgVideo) return;
+    const ok = await dlgCall(`/api/v1/videos/${encodeURIComponent(_dlgVideo.video_id)}/variants`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ height }),
+    }, `Creating ${height}p — progress shows bottom-right`);
+    if (ok) setTimeout(() => refreshDetails(), 600);
+  }
+
+  async function removeVariant(height) {
+    if (!_dlgVideo || !confirm(`Remove the ${height}p version?`)) return;
+    const ok = await dlgCall(`/api/v1/videos/${encodeURIComponent(_dlgVideo.video_id)}/variants/${height}`,
+                             { method: 'DELETE' }, `${height}p removed`);
+    if (ok) refreshDetails();
+  }
+
+  async function startDownload() {
+    if (!_dlgVideo) return;
+    const height     = parseInt(document.getElementById('dlg-height').value, 10);
+    let redownload = false;
+    try { redownload = !!JSON.parse(_dlgSnapshot).is_downloaded; } catch {}
+    if (redownload && !confirm('Replace the current file and delete its quality versions?')) return;
+    const ok = await dlgCall(`/api/v1/videos/${encodeURIComponent(_dlgVideo.video_id)}/download`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_height: height, replace: redownload }),
+    }, 'Download started — progress shows bottom-right');
+    if (ok) closeDetails();
+  }
+
   // Right-click on video cards
   document.addEventListener('contextmenu', e => {
     const cardEl = e.target.closest('.card[data-video-id]');
@@ -1030,7 +1500,7 @@
     if (!ctxMenu.contains(e.target)) hideCtxMenu();
   });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') hideCtxMenu();
+    if (e.key === 'Escape') { hideCtxMenu(); closeDetails(); }
   });
 </script>
 

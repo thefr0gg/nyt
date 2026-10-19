@@ -352,6 +352,37 @@
       background: rgba(244,132,95,0.18);
     }
 
+    /* Quality button (lives in the control bar so it also works in fullscreen) */
+    .ctrl-quality { position: relative; flex-shrink: 0; }
+
+    .ctrl-q-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: none;
+      border: 1.5px solid rgba(255,255,255,0.42);
+      color: rgba(255,255,255,0.82);
+      cursor: pointer;
+      font-family: var(--font-body);
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      line-height: 1.2;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+
+    .ctrl-q-btn:hover, .ctrl-quality.open .ctrl-q-btn {
+      color: #fff;
+      border-color: rgba(255,255,255,0.8);
+      background: rgba(255,255,255,0.1);
+    }
+
+    .ctrl-quality .quality-dd-menu { bottom: calc(100% + 10px); min-width: 150px; }
+    .quality-dd-opt .q-right { display: flex; align-items: center; gap: 8px; }
+    .quality-dd-opt .q-size { font-size: 11.5px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+    .quality-dd-opt { white-space: nowrap; }
+
     /* ── BELOW PLAYER ──────────────────────────────────── */
     .player-meta {
       margin-top: 16px;
@@ -734,88 +765,100 @@
   }
 
   // ── Resume playback ───────────────────────────────────
-  const _RESUME_KEY = id => `nyt_pos_${id}`;
-  let _saveTimer = null;
+  const _RESUME_KEY  = id => `nyt_pos_${id}`;
+  const _FINISHED_WITHIN = 10;    // within this many seconds of the end counts as "watched to the end"
 
   function savePosition(videoEl, videoId) {
-    if (videoEl.currentTime > 2) {
-      localStorage.setItem(_RESUME_KEY(videoId), String(videoEl.currentTime));
-    }
+    const t = videoEl.currentTime, d = videoEl.duration;
+    if (!(t > 2)) return;                                   // also skips the transient 0s while a source reloads
+    try {
+      if (Number.isFinite(d) && d > 0 && t >= d - _FINISHED_WITHIN) localStorage.removeItem(_RESUME_KEY(videoId));
+      else localStorage.setItem(_RESUME_KEY(videoId), String(t));
+    } catch {}
   }
 
   function clearPosition(videoId) {
-    localStorage.removeItem(_RESUME_KEY(videoId));
+    try { localStorage.removeItem(_RESUME_KEY(videoId)); } catch {}
   }
 
   function getSavedPosition(videoId) {
-    return parseFloat(localStorage.getItem(_RESUME_KEY(videoId)) || '0') || 0;
+    try { return parseFloat(localStorage.getItem(_RESUME_KEY(videoId)) || '0') || 0; } catch { return 0; }
+  }
+
+  function flashBanner(text) {
+    const banner = document.getElementById('resume-banner');
+    if (!banner) return;
+    banner.textContent = text;
+    banner.classList.add('show');
+    clearTimeout(flashBanner._t);
+    flashBanner._t = setTimeout(() => banner.classList.remove('show'), 2800);
   }
 
   function attachResume(videoEl, videoId) {
-    const banner = document.getElementById('resume-banner');
-    const saved  = getSavedPosition(videoId);
+    const saved = getSavedPosition(videoId);
+    let settled = !(saved > 5);     // until a saved position has been applied, don't overwrite it with the start of the video
+    let lastSave = 0;
 
-    videoEl.addEventListener('canplay', () => {
-      if (saved > 5 && Math.abs(videoEl.currentTime - saved) > 2) {
-        videoEl.currentTime = saved;
-        if (banner) {
-          banner.textContent = `Resuming from ${fmtTime(saved)}`;
-          banner.classList.add('show');
-          setTimeout(() => banner.classList.remove('show'), 2800);
-        }
-      }
-    }, { once: true });
+    function applySaved() {
+      if (settled) return;
+      const d = videoEl.duration;
+      const stale = Number.isFinite(d) && saved >= d - _FINISHED_WITHIN;      // the file changed or it was already finished
+      if (stale || Math.abs(videoEl.currentTime - saved) <= 2) { settled = true; return; }
+      videoEl.addEventListener('seeked', () => { settled = true; }, { once: true });
+      videoEl.currentTime = saved;
+      flashBanner(`Resuming from ${fmtTime(saved)}`);
+      setTimeout(() => { settled = true; }, 8000);                            // never stay locked if the seek event is lost
+    }
 
+    if (videoEl.readyState >= 1) applySaved();
+    else videoEl.addEventListener('loadedmetadata', applySaved, { once: true });
+
+    // Save while playing (every ~5s), not only on pause/unload — those aren't reliable on every browser.
     videoEl.addEventListener('timeupdate', () => {
-      clearTimeout(_saveTimer);
-      _saveTimer = setTimeout(() => savePosition(videoEl, videoId), 5000);
+      const now = Date.now();
+      if (settled && !videoEl.seeking && now - lastSave >= 5000) { lastSave = now; savePosition(videoEl, videoId); }
     });
+    const flush = () => { if (settled) savePosition(videoEl, videoId); };
+    videoEl.addEventListener('pause', flush);
+    window.addEventListener('beforeunload', flush);
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
-    videoEl.addEventListener('ended', () => clearPosition(videoId));
-    videoEl.addEventListener('pause', () => savePosition(videoEl, videoId));
-    window.addEventListener('beforeunload', () => savePosition(videoEl, videoId));
+    // Only a real finish forgets the position; a stray `ended` from a broken stream must not wipe it.
+    videoEl.addEventListener('ended', () => {
+      const d = videoEl.duration;
+      if (Number.isFinite(d) && d > 0 && videoEl.currentTime >= d - 1.5) clearPosition(videoId);
+    });
   }
 
-  // ── Quality selector ──────────────────────────────────
+  // ── Quality selector (in the control bar, so it also works in fullscreen) ──
+  const QUALITY_KEY = 'nyt.player.quality';     // remembered preferred height across videos; 0 = original
   let _currentFormatId = null;
+  let _formats = [];
 
   function buildSrc(videoId, formatId) {
     const base = `/api/v1/videos/${encodeURIComponent(videoId)}`;
-    return formatId ? `${base}?format_id=${encodeURIComponent(formatId)}` : base;
+    return formatId && formatId !== 'original' ? `${base}?format_id=${encodeURIComponent(formatId)}` : base;
   }
 
-  let _formats = [];
+  function fmtSize(n) {
+    if (!n) return '';
+    const u = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+  }
 
-  async function loadFormats(videoId) {
-    const wrap    = document.getElementById('quality-wrap');
-    const btn     = document.getElementById('quality-dd-btn');
-    const spinner = document.getElementById('quality-spinner');
-    if (!wrap || !btn) return;
-
-    spinner.classList.add('show');
-    btn.disabled = true;
-
-    try {
-      const res = await apiFetch(`/api/v1/videos/${encodeURIComponent(videoId)}/formats`);
-      if (!res.ok) { wrap.style.display = 'none'; return; }
-      const { formats, is_local } = await res.json();
-
-      if (!formats || formats.length === 0 || (is_local && formats.length <= 1)) {
-        wrap.style.display = 'none';
-        return;
-      }
-
-      _formats         = formats;
-      _currentFormatId = formats[0].format_id;
-
-      renderQualityMenu();
-      document.getElementById('quality-dd-current').textContent = formats[0].label;
-      btn.disabled = false;
-    } catch {
-      wrap.style.display = 'none';
-    } finally {
-      spinner.classList.remove('show');
-    }
+  // Start at the quality the viewer last chose: the largest version at or under it, else the nearest one above it.
+  function pickInitialFormat(formats) {
+    const original = formats[0];
+    let pref = null;
+    try { pref = JSON.parse(localStorage.getItem(QUALITY_KEY)); } catch {}
+    if (!pref || formats.length < 2) return original;
+    const variants = formats.filter(f => f.height > 0);
+    const fit = variants.filter(f => f.height <= pref).sort((a, b) => b.height - a.height)[0];
+    const above = variants.sort((a, b) => a.height - b.height)[0];
+    return fit || above || original;
   }
 
   function renderQualityMenu() {
@@ -825,8 +868,11 @@
       <button type="button" class="quality-dd-opt${f.format_id === _currentFormatId ? ' active' : ''}"
               role="option" aria-selected="${f.format_id === _currentFormatId}"
               data-format-id="${esc(f.format_id)}">
-        ${esc(f.label)}
-        <i data-lucide="check" class="check" style="width:14px;height:14px;"></i>
+        <span>${esc(f.label)}</span>
+        <span class="q-right">
+          <span class="q-size">${esc(fmtSize(f.size))}</span>
+          <i data-lucide="check" class="check" style="width:14px;height:14px;"></i>
+        </span>
       </button>`).join('');
     lucide.createIcons();
   }
@@ -836,21 +882,23 @@
     const btn   = document.getElementById('quality-dd-btn');
     const menu  = document.getElementById('quality-dd-menu');
     const label = document.getElementById('quality-dd-current');
+    const frame = document.getElementById('player-frame');
     if (!dd || !btn || !menu) return;
 
     function closeMenu() {
       dd.classList.remove('open');
+      frame?.classList.remove('menu-open');
       btn.setAttribute('aria-expanded', 'false');
     }
 
     function openMenu() {
       dd.classList.add('open');
+      frame?.classList.add('menu-open', 'ctrl-show');      // keep the controls on screen while choosing
       btn.setAttribute('aria-expanded', 'true');
     }
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      if (btn.disabled) return;
       dd.classList.contains('open') ? closeMenu() : openMenu();
     });
 
@@ -864,26 +912,25 @@
 
       const videoEl = document.querySelector('video');
       if (!videoEl) return;
-      const pos = videoEl.currentTime;
+      const pos        = videoEl.currentTime;
+      const wasPaused  = videoEl.paused;
+      const picked     = _formats.find(f => f.format_id === formatId);
       _currentFormatId = formatId;
-      label.textContent = _formats.find(f => f.format_id === formatId)?.label || '';
+      label.textContent = picked?.label || '';
       renderQualityMenu();
+      try { localStorage.setItem(QUALITY_KEY, JSON.stringify(picked?.height || 0)); } catch {}
 
       videoEl.src = buildSrc(videoId, _currentFormatId);
       videoEl.load();
       videoEl.addEventListener('canplay', () => {
         videoEl.currentTime = pos;
-        videoEl.play();
+        if (wasPaused) videoEl.pause(); else videoEl.play();     // <video autoplay> would otherwise start a paused video
+        flashBanner(`Quality: ${picked?.label || ''}`);
       }, { once: true });
     });
 
-    document.addEventListener('click', e => {
-      if (!dd.contains(e.target)) closeMenu();
-    });
-
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') closeMenu();
-    });
+    document.addEventListener('click', e => { if (!dd.contains(e.target)) closeMenu(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
   }
 
   // ── Chapter bar ───────────────────────────────────────
@@ -977,14 +1024,14 @@
       frame.classList.add('ctrl-show');
       clearTimeout(hideTimer);
       if (!videoEl.paused) {
-        hideTimer = setTimeout(() => frame.classList.remove('ctrl-show'), 3000);
+        hideTimer = setTimeout(() => { if (!frame.classList.contains('menu-open')) frame.classList.remove('ctrl-show'); }, 3000);
       }
     }
 
     frame.addEventListener('mousemove', showCtrls);
     frame.addEventListener('mouseenter', showCtrls);
     frame.addEventListener('mouseleave', () => {
-      if (!videoEl.paused) {
+      if (!videoEl.paused && !frame.classList.contains('menu-open')) {
         clearTimeout(hideTimer);
         frame.classList.remove('ctrl-show');
       }
@@ -1071,7 +1118,20 @@
       volEl.style.setProperty('--pct', (parseFloat(volEl.value) * 100).toFixed(1) + '%');
     });
 
-    videoEl.addEventListener('volumechange', updateVolUI);
+    // Remember volume + mute globally (shared by every video) instead of resetting to 100% on each page.
+    const VOL_KEY = 'nyt.player.volume';
+    try {
+      const saved = JSON.parse(localStorage.getItem(VOL_KEY) || 'null');
+      if (saved && Number.isFinite(saved.volume)) {
+        videoEl.volume = Math.min(1, Math.max(0, saved.volume));
+        videoEl.muted  = !!saved.muted;
+      }
+    } catch {}
+
+    videoEl.addEventListener('volumechange', () => {
+      updateVolUI();
+      try { localStorage.setItem(VOL_KEY, JSON.stringify({ volume: videoEl.volume, muted: videoEl.muted })); } catch {}
+    });
     updateVolUI();
 
     // ── CC ────────────────────────────────────────────
@@ -1133,8 +1193,11 @@
   }
 
   // ── Player: downloaded (local file, custom controls) ──
-  function showPlayer(videoId, title, qualityEnabled) {
-    const src = buildSrc(videoId, null);
+  function showPlayer(videoId, title, formats) {
+    _formats = formats || [];
+    const initial = _formats.length > 1 ? pickInitialFormat(_formats) : null;
+    _currentFormatId = initial ? initial.format_id : 'original';
+    const src = buildSrc(videoId, _currentFormatId);
     root.innerHTML = `
       <div class="player-frame ctrl-pause" id="player-frame">
         <video autoplay preload="metadata">
@@ -1161,6 +1224,14 @@
             </div>
             <span class="ctrl-time" id="ctrl-time">0:00 / --:--</span>
             <div style="flex:1"></div>
+            <div class="quality-dd ctrl-quality" id="quality-dd" style="display:none">
+              <button class="ctrl-q-btn" id="quality-dd-btn" type="button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Video quality">
+                <i data-lucide="settings" style="width:13px;height:13px"></i>
+                <span id="quality-dd-current"></span>
+              </button>
+              <div class="quality-dd-menu" id="quality-dd-menu" role="listbox"></div>
+            </div>
             <button class="ctrl-cc-btn" id="ctrl-cc" style="display:none" aria-label="Toggle subtitles">CC</button>
             <button class="ctrl-btn" id="ctrl-fs" aria-label="Fullscreen">
               <i data-lucide="maximize" class="icon-maximize" style="width:20px;height:20px"></i>
@@ -1178,25 +1249,17 @@
       </div>
       <div class="player-meta">
         ${title ? `<div class="video-title">${esc(title)}</div>` : '<div></div>'}
-        <div class="quality-wrap" id="quality-wrap" style="${qualityEnabled ? '' : 'display:none'}">
-          <span class="quality-label">Quality</span>
-          <div class="quality-spinner" id="quality-spinner"></div>
-          <div class="quality-dd" id="quality-dd">
-            <button class="quality-dd-btn" id="quality-dd-btn" type="button" disabled
-                    aria-haspopup="listbox" aria-expanded="false">
-              <span id="quality-dd-current">Loading…</span>
-              <i data-lucide="chevron-up" class="chev" style="width:15px;height:15px;"></i>
-            </button>
-            <div class="quality-dd-menu" id="quality-dd-menu" role="listbox"></div>
-          </div>
-        </div>
       </div>`;
 
     const videoEl = document.querySelector('video');
     attachResume(videoEl, videoId);
 
-    if (qualityEnabled) {
-      loadFormats(videoId).then(() => attachQualitySelector(videoId));
+    // Only offered when there is more than the original (i.e. quality versions exist for this video).
+    if (_formats.length > 1) {
+      document.getElementById('quality-dd').style.display = '';
+      document.getElementById('quality-dd-current').textContent = initial.label;
+      renderQualityMenu();
+      attachQualitySelector(videoId);
     }
   }
 
@@ -1233,30 +1296,21 @@
     showLoading();
 
     try {
-      const [statusRes, settingsRes] = await Promise.all([
-        apiFetch(`/api/v1/videos/${encodeURIComponent(videoId)}/status`),
-        fetch('/api/v1/settings').catch(() => null),
-      ]);
+      const statusRes = await apiFetch(`/api/v1/videos/${encodeURIComponent(videoId)}/status`);
 
       if (!statusRes.ok) throw new Error();
       const { video_status } = await statusRes.json();
       if (!video_status.is_present) { showNotFound(videoId); return; }
-
-      let qualityEnabled = false;
-      if (settingsRes && settingsRes.ok) {
-        const settingsData = await settingsRes.json();
-        const s = settingsData.settings ?? {};
-        qualityEnabled = !!s.transcoding_enabled;
-      }
 
       let title        = null;
       let isDownloaded = true;
       let subtitles    = [];
       let chapters      = [];
 
-      const [listRes, metaRes] = await Promise.all([
+      const [listRes, metaRes, formatsRes] = await Promise.all([
         apiFetch('/api/v1/videos/list/').catch(() => null),
         apiFetch(`/api/v1/videos/${encodeURIComponent(videoId)}/metadata`).catch(() => null),
+        apiFetch(`/api/v1/videos/${encodeURIComponent(videoId)}/formats`).catch(() => null),
       ]);
 
       if (listRes && listRes.ok) {
@@ -1279,7 +1333,10 @@
         chapters  = meta.chapters  || [];
       }
 
-      showPlayer(videoId, title, qualityEnabled);
+      let formats = [];
+      if (formatsRes && formatsRes.ok) formats = (await formatsRes.json()).formats || [];
+
+      showPlayer(videoId, title, formats);
       lucide.createIcons();
 
       const videoEl = document.querySelector('video');

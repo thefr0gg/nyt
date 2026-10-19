@@ -19,3 +19,4 @@ class Videos:
     variants:       list = field(default_factory=list)
     subtitles:      list = field(default_factory=list)
     chapters:       list = field(default_factory=list)
+    pinned:         bool = False   # 'watch later': sorted first, exempt from auto-delete

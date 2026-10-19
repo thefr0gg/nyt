@@ -87,6 +87,8 @@ def _watcher_loop(delay_minutes: int) -> None:
             cfg = ConfigManager().load_config()
             if cfg.AUTO_DELETE_WATCHED_DAYS > 0:
                 classes.nyt.cleanup_watched_videos(cfg.AUTO_DELETE_WATCHED_DAYS)
+            if cfg.TRANSCODING_ENABLED:
+                classes.nyt.start_transcode_backfill()
             watcher_state.last_run = datetime.now(timezone.utc)
             watcher_state.error    = None
         except Exception as e:
@@ -226,6 +228,13 @@ _DISPATCH = {
 
 
 def run() -> None:
+    # Log messages contain non-ASCII (—, …); don't let a legacy console codepage crash logging.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     # Configure loguru
     logger.remove()
     logger.add(
@@ -239,6 +248,7 @@ def run() -> None:
         filename=config.API_LOGS_FILE_PATH,
         maxBytes=10 * 1024 * 1024,
         backupCount=3,
+        encoding="utf-8",  # the locale default (cp1252 on Windows) can't encode arrows/dashes in messages
     )
     logger.add(handler, level="DEBUG", format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
 
